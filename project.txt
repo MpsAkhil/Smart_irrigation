@@ -1,0 +1,161 @@
+#include "stm32f4xx.h"
+#include<stdio.h>
+// Function prototypes
+void init_gpio(void);
+void init_adc(void);
+void configure_button_interrupt(void);
+void EXTI9_5_IRQHandler(void);
+void USART2_Init(void);
+void USART2_Write(char c);
+void USART2_SendString(char *str);
+void toggle_system(void);
+int read_adc(uint8_t channel);
+
+volatile int system_active = 0; // Flag for system toggle
+const int moisture_high_threshold = 800;
+const int moisture_medium_threshold = 500;
+const int moisture_low_threshold = 200;
+
+// Simple delay function
+void delay(int time) {
+    for (int i = 0; i < time * 1000; i++);
+}
+
+int main(void) {
+    init_gpio();                 // Initialize GPIO pins
+    init_adc();                  // Initialize ADC
+    configure_button_interrupt();// Configure button interrupt on PA6
+    USART2_Init();               // Initialize USART2 for communication
+    
+    USART2_SendString("System Initialized\r\n");
+
+    while (1) {
+        if (system_active) {
+            // Read moisture sensor
+            int moistureValue = read_adc(11); // PA11 as analog input
+            // Read water level sensor
+            int waterLevelValue = read_adc(1); // PA1 as analog input
+
+            // Send moisture data over USART2
+            USART2_SendString("Moisture Value: ");
+            char buffer[10];
+            sprintf(buffer, "%d\r\n", moistureValue);
+            USART2_SendString(buffer);
+
+            // LED logic based on moisture levels
+            if (moistureValue > moisture_high_threshold) {
+                // High moisture
+                GPIOA->ODR |= (1 << 5);  // Turn on LED connected to PA5 (high moisture indicator)
+                GPIOA->ODR &= ~(1 << 4); // Turn off medium moisture LED (PA4)
+                GPIOA->ODR &= ~(1 << 7); // Turn off low moisture LED (PA7)
+            } else if (moistureValue > moisture_medium_threshold) {
+                // Medium moisture
+                GPIOA->ODR &= ~(1 << 5); // Turn off high moisture LED (PA5)
+                GPIOA->ODR |= (1 << 4);  // Turn on LED connected to PA4 (medium moisture indicator)
+                GPIOA->ODR &= ~(1 << 7); // Turn off low moisture LED (PA7)
+            } else {
+                // Low moisture
+                GPIOA->ODR &= ~(1 << 5); // Turn off high moisture LED (PA5)
+                GPIOA->ODR &= ~(1 << 4); // Turn off medium moisture LED (PA4)
+                GPIOA->ODR |= (1 << 7);  // Turn on LED connected to PA7 (low moisture indicator)
+            }
+
+            // Send water level data over USART2
+            USART2_SendString("Water Level Value: ");
+            sprintf(buffer, "%d\r\n", waterLevelValue);
+            USART2_SendString(buffer);
+
+            // Simple delay
+            delay(500);
+        } else {
+            // System is inactive, turn off LEDs
+            GPIOA->ODR &= ~(1 << 5); // Turn off high moisture LED (PA5)
+            GPIOA->ODR &= ~(1 << 4); // Turn off medium moisture LED (PA4)
+            GPIOA->ODR &= ~(1 << 7); // Turn off low moisture LED (PA7)
+        }
+    }
+}
+
+void init_gpio(void) {
+    RCC->AHB1ENR |= (1U << 0); // Enable GPIOA clock
+
+    // Configure PA1 and PA11 as analog input (for ADC)
+    GPIOA->MODER |= (3U << (2 * 1));
+    GPIOA->MODER |= (3U << (2 * 11));
+
+    // Configure PA6 as input (button)
+    GPIOA->MODER &= ~(3U << (2 * 6));
+    GPIOA->PUPDR |= (1U << (2 * 6)); // Set pull-up for PA6
+
+    // Configure PA5, PA4, and PA7 as output (LEDs)
+    GPIOA->MODER |= (1U << (2 * 5)); // PA5 as output
+    GPIOA->MODER |= (1U << (2 * 4)); // PA4 as output
+    GPIOA->MODER |= (1U << (2 * 7)); // PA7 as output
+}
+
+void init_adc(void) {
+    RCC->APB2ENR |= (1 << 8); // Enable ADC1 clock
+    ADC1->CR2 = (1 << 0);     // Enable ADC
+}
+
+int read_adc(uint8_t channel) {
+    ADC1->SQR3 = channel;     // Select ADC channel
+    ADC1->CR2 |= (1 << 30);   // Start ADC conversion
+    while (!(ADC1->SR & (1 << 1))); // Wait for conversion to complete
+	
+    return ADC1->DR;          // Read ADC data
+}
+
+void configure_button_interrupt(void) {
+    RCC->APB2ENR |= (1U << 14); // Enable SYSCFG clock
+    SYSCFG->EXTICR[1] |= (0 << 8); // Set PA6 as EXTI6
+    EXTI->IMR |= (1U << 6);      // Unmask EXTI6
+    EXTI->RTSR |= (1U << 6);     // Trigger on rising edge
+
+    NVIC_EnableIRQ(EXTI9_5_IRQn);  // Enable EXTI6 interrupt in NVIC
+}
+
+void EXTI9_5_IRQHandler(void) {
+    if (EXTI->PR & (1U << 6)) {  // Check if EXTI6 triggered
+        toggle_system();
+        EXTI->PR |= (1U << 6);   // Clear pending bit
+    }
+}
+
+void toggle_system(void) {
+    system_active = !system_active; // Toggle the system active flag
+}
+
+void USART2_Init(void) {
+    // Enable USART2 and GPIOA clock
+    RCC->APB1ENR |= (1 << 17); // USART2 clock enable
+    RCC->AHB1ENR |= (1 << 0);  // GPIOA clock enable
+
+    // Configure PA2 as USART2_TX (AF7)
+    GPIOA->MODER &= ~(3 << (2 * 2)); // Clear PA2 mode
+    GPIOA->MODER |= (2 << (2 * 2));  // Set PA2 as alternate function mode
+    GPIOA->AFR[0] |= (7 << (4 * 2)); // Set AF7 (USART2_TX) for PA2
+
+    // Configure PA3 as USART2_RX (AF7)
+    GPIOA->MODER &= ~(3 << (2 * 3)); // Clear PA3 mode
+    GPIOA->MODER |= (2 << (2 * 3));  // Set PA3 as alternate function mode
+    GPIOA->AFR[0] |= (7 << (4 * 3)); // Set AF7 (USART2_RX) for PA3
+
+    // Configure USART2 baud rate (9600 for 16 MHz clock)
+    USART2->BRR = 0x0683;
+
+    // Enable USART2, Transmitter, and Receiver
+    USART2->CR1 = USART_CR1_UE | USART_CR1_TE | USART_CR1_RE; 
+}
+
+void USART2_Write(char c) {
+    while (!(USART2->SR & (1 << 7))); // Wait until TXE (Transmit data register empty)
+    USART2->DR = c;
+}
+
+void USART2_SendString(char *str) {
+    while (*str) {
+        USART2_Write(*str++);
+    }// Add carriage return
+    USART2_Write('\r'); // Add newline
+	}
